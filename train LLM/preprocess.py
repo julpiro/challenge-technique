@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""
-Clean the raw Codeforces-like dataset into a multi-label JSONL for LLM fine-tuning.
 
-Changes vs previous version:
-- KEEP multi-label `tags` (no explosion to single-label rows)
-- Filter to the 8 focus tags, drop rows with none remaining
-- Build `text_full` using ONLY [DESCRIPTION] + [SOURCE CODE]
-- Ensure `src_uid` exists
-- Export a single `clean_dataset.jsonl` with columns: text_full, tags (list), src_uid
-
-Usage (minimal, no CLI args needed):
-    python clean_dataset.py
-
-If you want to change paths, edit the constants below.
-"""
 import os
 import json
 import pandas as pd
@@ -64,7 +50,6 @@ def merge_text_only_desc_and_code(row) -> str:
 def main():
     df = read_folder_to_df(RAW_DIR)
 
-    # Make sure required columns exist
     for c in ['prob_desc_description', 'source_code', 'tags', 'src_uid']:
         if c not in df.columns:
             df[c] = '' if c != 'tags' else []
@@ -73,24 +58,19 @@ def main():
     df['tags'] = df['tags'].apply(as_list)
     df['tags'] = df['tags'].apply(lambda lst: [t for t in lst if t in FOCUS_TAGS])
 
-    # Drop rows with no remaining focus tag
     df = df[df['tags'].map(len) > 0].reset_index(drop=True)
 
     # Build text_full with ONLY description + source_code
     df['text_full'] = df.apply(merge_text_only_desc_and_code, axis=1)
 
-    # Ensure src_uid exists (deterministic fallback on text)
     if 'src_uid' not in df.columns or df['src_uid'].eq('').any():
         df['src_uid'] = pd.util.hash_pandas_object(df['text_full'], index=False).astype(str)
 
-    # Keep minimal columns for LLM fine-tuning
     out = df[['text_full', 'tags', 'src_uid']].copy()
 
     # Export single JSONL
     out.to_json(OUT_FILE, orient='records', lines=True, force_ascii=False)
     print(f"✅ Wrote {len(out)} samples to {OUT_FILE}")
-    print("Columns:", list(out.columns))
-    # Small preview
 
 
 if __name__ == '__main__':
