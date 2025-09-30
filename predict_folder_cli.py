@@ -6,6 +6,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from huggingface_hub import hf_hub_download
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score, classification_report, precision_recall_fscore_support
 
@@ -13,8 +14,9 @@ FOCUS_LABELS = ['math','graphs','strings','number theory','trees','geometry','ga
 
 # --------------------------- IO helpers ---------------------------
 
-def load_thresholds(model_dir: str):
-    path = os.path.join(model_dir, "thresholds.json")
+def load_thresholds_from_hub(model_id: str, revision: str | None, token: str | None):
+    path = hf_hub_download(repo_id=model_id, filename="thresholds.json",
+                           revision=revision, token=token)
     with open(path, "r", encoding="utf-8") as f:
         obj = json.load(f)
     return obj["labels"], obj["thresholds"]
@@ -44,11 +46,9 @@ def to_text_full(desc: str, code: str) -> str:
 def ensure_uid(uid: str, text_full: str) -> str:
     if isinstance(uid, str) and uid.strip():
         return uid
-    # deterministic fallback
     return hashlib.md5(text_full.encode("utf-8")).hexdigest()
 
-def load_and_preprocess_folder(path: str, drop_no_focus_for_eval: bool) -> List[dict]:
-    """Read raw *.json recursively and return cleaned records like training."""
+def load_and_preprocess_folder(path: str) -> List[dict]:
     patterns = [os.path.join(path, "**", "*.json"), os.path.join(path, "**", "*.JSON")]
     files = sorted({p for patt in patterns for p in glob.glob(patt, recursive=True)})
     if not files:
@@ -71,40 +71,25 @@ def load_and_preprocess_folder(path: str, drop_no_focus_for_eval: bool) -> List[
         text_full = to_text_full(desc, code)
         uid = ensure_uid(raw.get("src_uid", ""), text_full)
 
-        # filter tags to focus set (if present)
         tags = raw.get("tags", [])
         if not isinstance(tags, list):
             tags = [tags] if tags else []
         tags_focus = [t for t in tags if t in FOCUS_LABELS]
-
-        if not tags_focus:
+        rec = {"text_full": text_full, "src_uid": uid, "_file_name": os.path.relpath(fp, path)}
+        if tags_focus:
+            rec["tags"] = tags_focus
+        else:
             no_focus += 1
-            # keep the row for prediction, but it won't be scored unless you want to
-            rec = {"text_full": text_full, "src_uid": uid, "_file_name": os.path.relpath(fp, path)}
-            out.append(rec)
-            continue
-
-        rec = {
-            "text_full": text_full,
-            "src_uid": uid,
-            "tags": tags_focus,
-            "_file_name": os.path.relpath(fp, path)
-        }
         out.append(rec)
 
     print(f"[INFO] Prepared {len(out)} records (rows without focus tags: {no_focus})")
-    if drop_no_focus_for_eval:
-        # nothing to drop here—prediction keeps all; evaluation function will ignore rows without ground truth
-        pass
     return out
 
 def load_and_preprocess_jsonl(path: str) -> List[dict]:
-    """Read JSONL that may contain raw-ish rows and normalize to training format."""
     out = []
     for row in iter_jsonl(path):
         text_full = row.get("text_full")
         if not text_full:
-            # try to assemble from raw fields if present
             text_full = to_text_full(row.get("prob_desc_description", ""), row.get("source_code", ""))
         uid = ensure_uid(row.get("src_uid", ""), text_full)
         tags = row.get("tags", [])
@@ -139,7 +124,6 @@ def predict_records(model, tok, labels, thresholds, records: List[dict],
                     avoid_repeats: bool, device: str) -> List[dict]:
     used_per_uid = defaultdict(set) if avoid_repeats else None
     outputs = []
-
     texts = [str(r.get("text_full", "") or "") for r in records]
 
     with torch.no_grad():
@@ -184,7 +168,7 @@ def evaluate(pred_rows: List[dict], label_list: List[str]) -> Dict:
     y_true, y_pred = [], []
     for r in pred_rows:
         true = r.get("_true_tags")
-        if not true:  # skip rows without GT
+        if not true:
             continue
         y_true.append([t for t in true if t in label_list])
         y_pred.append([t for t in r.get("predicted_tags", []) if t in label_list])
@@ -212,8 +196,10 @@ def evaluate(pred_rows: List[dict], label_list: List[str]) -> Dict:
 # --------------------------- CLI ---------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="Predict (and evaluate) with all preprocessing included.")
-    ap.add_argument("--model_dir", required=True, help="Fine-tuned model dir with thresholds.json")
+    ap = argparse.ArgumentParser(description="Predict (and evaluate) using a model hosted on the Hugging Face Hub.")
+    ap.add_argument("--model_id", required=True, help="HF repo id, e.g. your-username/code-tagging-llm")
+    ap.add_argument("--revision", default=None, help="Optional branch/tag/commit on the Hub")
+    ap.add_argument("--hf_token", default=os.getenv("HF_TOKEN"), help="HF token if the repo is private")
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--input_dir", help="Folder of raw sample_*.json (recursive)")
     group.add_argument("--input_jsonl", help="JSONL; if raw-ish, will be normalized")
@@ -225,24 +211,24 @@ def main():
     ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--avoid_repeats_per_uid", action="store_true")
     ap.add_argument("--device", choices=["cpu","cuda"], default=None)
-    ap.add_argument("--drop_no_focus_for_eval", action="store_true",
-                    help="Rows without any focus tag are ignored in evaluation (they already are); predictions still saved.")
     args = ap.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    labels, thresholds = load_thresholds(args.model_dir)
-    tok = AutoTokenizer.from_pretrained(args.model_dir, use_fast=True)
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_dir).to(device)
+    # Load tokenizer & model from Hub
+    tok = AutoTokenizer.from_pretrained(args.model_id, revision=args.revision, token=args.hf_token, use_fast=True)
+    model = AutoModelForSequenceClassification.from_pretrained(args.model_id, revision=args.revision, token=args.hf_token).to(device)
     model.eval()
 
-    # Preprocess
+    # Load thresholds.json from Hub
+    labels, thresholds = load_thresholds_from_hub(args.model_id, args.revision, args.hf_token)
+
+    # Preprocess input
     if args.input_dir:
-        records = load_and_preprocess_folder(args.input_dir, args.drop_no_focus_for_eval)
+        records = load_and_preprocess_folder(args.input_dir)
     else:
         records = load_and_preprocess_jsonl(args.input_jsonl)
-
     if not records:
         print("[WARN] No records to process.")
         save_jsonl([], args.output)
@@ -257,7 +243,7 @@ def main():
     save_jsonl(preds, args.output)
     print(f"✅ Wrote predictions to {args.output}  ({len(preds)} rows)")
 
-    # Evaluate (only uses rows with ground-truth focus tags)
+    # Evaluate when ground-truth is available
     eval_obj = evaluate(preds, FOCUS_LABELS)
     if eval_obj.get("n_eval", 0) > 0 and "report_text" in eval_obj:
         with open(args.eval_out, "w", encoding="utf-8") as f:
