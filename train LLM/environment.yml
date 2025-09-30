@@ -1,0 +1,14 @@
+name: challenge
+channels:
+  - conda-forge
+  - pytorch
+  - huggingface
+dependencies:
+  - python=3.10
+  - numpy=1.24.*
+  - pandas
+  - scikit-learn
+  - pytorch
+  - transformers
+  - datasets
+  - pip
