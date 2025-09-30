@@ -7,11 +7,11 @@ from transformers import (AutoTokenizer, AutoModelForSequenceClassification,
                           Trainer, TrainingArguments, DataCollatorWithPadding)
 
 # ----------------- Config -----------------
-CLEAN_FILE = "clean_dataset.jsonl"   # from clean_dataset.py (columns: text_full, tags(list), src_uid)
-TRAIN_FILE = "train.jsonl"           # will be written by this script
-TEST_FILE  = "test.jsonl"            # will be written by this script
+CLEAN_FILE = "clean_dataset.jsonl"   
+TRAIN_FILE = "train.jsonl"          
+TEST_FILE  = "test.jsonl"            
 
-MODEL_NAME = "microsoft/codebert-base"     # or "distilbert-base-uncased"
+MODEL_NAME = "microsoft/codebert-base"    
 MAX_LEN    = 512
 LR         = 2e-5
 EPOCHS     = 3
