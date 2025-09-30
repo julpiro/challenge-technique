@@ -11,7 +11,7 @@ python predict_folder_cli.py \
   --output predictions.jsonl \
   --k 3 \
   --avoid_repeats_per_uid
-
+```
 
 ## Key options
 
