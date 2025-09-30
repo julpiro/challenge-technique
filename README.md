@@ -4,6 +4,7 @@ Run the CLI on a folder of raw JSON problem files (e.g. sample_0.json, sample_1.
 
 You just need to replace 'path/to/test_data':
 
+```bash
 python predict_folder_cli.py \
   --model_id julpiro/challenge_technique \
   --input_dir path/to/test_data \  
